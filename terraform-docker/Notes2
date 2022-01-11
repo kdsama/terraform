@@ -1,0 +1,146 @@
+Maps and Looksups : 
+
+They are utilized , where you ask ? This is utilized to give the ability to terraform to setup differnt kind 
+of environments.
+Fine tune deploymentes for dev and prod is really important  
+Dev might have debugging on , or a different image might be used
+
+
+
+
+variable "env"{
+    type = string 
+    default = "dev"
+}
+
+Now for this example, we would need different images according to the environment 
+variable "image"{
+  type = map 
+  description = "Image for container "
+  default = {
+
+  dev = "nodered/node-red:latest"
+  prod = "nodered/node-red:latest-stable"
+  }
+}
+Now how to refer the correct one ? 
+>> terraform console 
+>> lookup ({dev = "a",prod = "b"},"prod")
+So in the docker image resource 
+
+resource "docker_image" "nodered_image" {
+  name = lookup(var.image,var.env)
+}
+
+
+
+
+
+Maps and Lookups : Ports 
+For external port mapping make changes to terraform.tfvars and replace type from list to map 
+Now go to variables 
+
+Locals 
+
+locals {
+  container_count = length(lookup(var.ext_port),var.env)
+}
+
+Main.tf 
+resource "docker_container" "nodered_container" {
+  count = local.container_count
+  name  = join("-", ["zaza", random_string.random[count.index].result])
+  // above resource needs to be referenced 
+  image = docker_image.nodered_image.latest
+  // latest provide the ID of the image . GIves a unique id that can be referenced 
+  ports {
+    internal = var.int_port
+    external = lookup(var.ext_port,var.env)[count.index]            // lookup here as well 
+  }
+  volumes {
+    container_path = "/data"
+    host_path = "${path.cwd}/noderedvol"
+  }
+}
+
+
+Now validation blocks needs to be changed 
+You cant reference other vairables here 
+As there are two environments only , We can add validation for the environments individually 
+We can have multiple validation blocks 
+
+variable "ext_port" {
+  type    = map
+  
+    # sensitive = true 
+  validation {
+    condition = max(var.ext_port["dev"]...) <= 65535 && min(var.ext_port["dev"]...) > 0 
+    error_message = "Internal port should always be 1180."
+  }
+
+
+    validation {
+    condition = max(var.ext_port["prod"]...) <= 65535 && min(var.ext_port["prod"]...) > 0 
+    error_message = "Internal port should always be 1180."
+  }
+}
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+Terraform Workspaces 
+Workspaces are tied to version control 
+When to be used ? when we need to simulatenously deploy in different environments .
+It probably will have different environments , different configuration and for that we need a Workspace 
+They are isolated versions of terraform states 
+
+
+For this example ,we need dev and prod workspaces 
+>> terraform workspace new dev 
+
+Which workspace you are in currently ??
+>> terraform workspace show 
+
+List the workspaces ??
+>> terraform workspace list
+
+IN tfstate.d there will be separate folders for the workspaces we created 
+terraform.tfstate outside is the default workspace . 
+to select a different workspace 
+>> terraform workspace select dev 
+Now we would like to apply in dev environment workspace 
+How to do that ?? 
+>> terraform workspace select dev 
+>> terraform apply --auto-approve -var="env=dev"
+
+
+So when we apply or destroy ,we apply/destroy one at a time, the one that has been selected     
+
+
+
+Referencing Your Workspace 
+terraform.workspace will help us remove dependency on env variable everywhere. Now the workspace is ther 
+reference to the env variable and hence we can switch them out 
+>> terraform.console 
+>> terraform.workspace
+
+Our aim here is to remove dependency on the variable env thats present in variables.tf file 
+delete env from variables.tf 
+replace var.env with terraform.workspace
+Add workspace in container name 
+
+
+
+Utilizing Map Keys instead of Lookups 
+remove lookups and use map key as we use in programming languages 
+NOTE :- LOOKUP IS USEFUL IF YOU WANT TO USE A DEFAULT 

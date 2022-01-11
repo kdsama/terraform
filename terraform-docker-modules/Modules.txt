@@ -1,0 +1,230 @@
+Modular Deployments 
+
+A different file for provider ==> providers.tf 
+
+
+First Module ==> docker-image
+new folder ==> image
+
+Each module might have similar files aka main, providers, output, variables
+Also , we would need to reference the modules/tf to root's tf 
+For that we would need to create a module block , instead of resource block 
+
+module "image" {
+    source = "./image"
+}
+
+
+But what if we have a reference in the root tf to the module's tf . What to do in that case ?
+
+We will have to utilise the output.tf of the module block 
+In images/output.tf 
+output "image_out" {
+  value       = docker_image.nodered_image.latest
+  description = "Ip address of the container"
+}
+NOw we need to access this output from root's main.tf 
+This reference is done as :::: 
+image = module.image.image_out 
+Always do a terraform init after creating a new module 
+
+
+How to get the image name that is hardcoded , turnt into a variable/const ??? ?
+That needs to be passed from the root to the module and consumed there . 
+So we need to pass in a variable in the module so it can be consumed by the module 
+
+module "image"{
+    source = "./image"
+    image_in  = var.image[terraform.workspace]
+}
+Data we send to modules is with the intent that it should not be changed. 
+The data should be immutable and our priority should be to never touch the code inside the modules 
+
+In image/main.tf 
+Replace 
+resource "docker_image" "nodered_image" {
+
+    name = "nodered/node-red:latest"
+}
+
+with 
+resource "docker_image" "nodered_image" {
+#   name = var.image[terraform.workspace]
+    name = var.image_in
+}
+and to bridge this gap 
+in image/variables.tf 
+variable "input_in"{
+    description = "name of nodered image"
+}
+
+
+Basically imag_in of module "image" is consumed by image/variables.tf file .
+ And this is referenced in image/main.tf 
+
+
+
+
+
+ Terraform Graph 
+ It shows dependency route/graph of the dependencies. It is not clear enough tbh 
+
+
+
+
+We need volume to container be mounted before the container resource runs, 
+or else we will get ourselves into an error. 
+We basically want a resource to be dependent on another resource.
+So for our case we want something from null_resource.dockervol to be wanted by 
+container resource which would lead to sequential rundown (implicit dependencies )
+
+To do that , in the container name 
+name  = join("-", ["zaza", terraform.workspace,null_resource.noderedvol.id,random_string.random[count.index].result])
+
+Install graphwiz and use it like this 
+>>  sudo apt install graphviz
+>> terraform graph | dot -Tpdf > file.pdf
+
+
+
+Explicit dependencies . 
+Do the thing above using this method 
+Add depends_on which sill sequentialise the resources 
+
+
+
+in image/providers.tf we dont need provider "docker" as it is inheritance. 
+REMOVE IT 
+
+
+
+
+
+Module Outputs 
+//Output important pieces of information ==> Output cannot have spaces
+output "IP_ADDRESS" {
+  value       = module.container[*].IP_ADDRESS
+  description = "Ip address of the container"
+  sensitive = true 
+}
+output "CONTAINER_NAME" {
+  value       = module.container[*].CONTAINER_NAME 
+  description = "Ip address of the container"
+}
+
+if you put module.container.CONTAINER_NAME 
+It will show an error like this 
+ Error: Unsupported attribute
+│ 
+│   on outputs.tf line 8, in output "CONTAINER_NAME":
+│    8:   value       = module.container.CONTAINER_NAME 
+│     ├────────────────
+│     │ module.container is a list of object, known only after apply
+│ 
+│ Can't access attributes on a list of objects. Did you mean to access attribute "CONTAINER_NAME" for a specific element of the list, or across all elements of the list?
+
+||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||
+
+
+
+For our code Output of IP might be coming like this 
+
+
+
+
+Docker Volume 
+docker_volume instead of local exec 
+one Note is every volume needs to be tightly coupled with the container. 
+Thats why we are not having a volume module 
+So now 
+  volumes {
+    container_path = var.container_path
+    host_path = var.host_path
+  }
+
+  becomes 
+    volumes {
+    container_path = var.container_path
+    host_path = "${var.name_container_in}--volume"
+  }
+  Now when we do terraform apply , we can see the newly created volume here 
+  >> docker volume ls 
+  But once you do a terraform destroy , the volume wont be destroyed 
+
+  For that we might need a docker_volume resource 
+  But when we use this 
+
+resource "docker_container" "nodered_container" {
+  name  = var.name_container_in  
+  image = var.image_container_in
+  
+  
+  ports {
+   internal = var.internal_container_port
+   external = var.external_container_port
+  }
+  
+  volumes {
+    container_path = var.container_path
+    host_path = docker_volume.container_volume.name
+  }
+}
+
+resource "docker_volume" "container_volume"{
+  name = "$docker_container.nodered_container.name}--volume"
+}
+
+We will have an error because of cyclic dependency 
+container needs volume name and volume name needs container name 
+How to resolve this dependency ???
+
+To check cycles 
+>> terraform graph -draw-cycles | dot -Tpdf > graph-cycle.pdf
+For now remove it by using var directly 
+
+Do a terraform destroy and the volume will be removed
+
+
+
+HOw to manage / prevent destruction of the Volume || How to selectively destroy resources 
+
+We will have to use lifecycles to customly prevent destruction 
+https://www.terraform.io/language/meta-arguments/lifecycle
+resource "docker_volume" "container_volume"{
+  name = "$docker_container.nodered_container.name}--volume"
+  lifecycle {
+      prevent_destroy=true
+  }
+}
+So now when try to do a terraform destroy this will come up 
+
+╷
+│ Error: Instance cannot be destroyed
+│ 
+│   on container/main.tf line 17:
+│   17: resource "docker_volume" "container_volume"{
+│ 
+│ Resource module.container[0].docker_volume.container_volume has lifecycle.prevent_destroy set, but the plan calls for this resource to be destroyed. To avoid this error and continue with the plan, either disable
+│ lifecycle.prevent_destroy or reduce the scope of the plan using the -target flag.
+╵
+
+
+
+
+
+To delete a specific module , we use target 
+>> terraform destroy --target {resourcename}
+
+
+
+
+
+
+
+
+
+Multiple resources , single Module 
+So till now we have been using a single image i.e node-red. 
+But what if we want to use several images ? 
+Would you like to create a separate resource for it ? No , we would like to keep it 
+as dry as possible . How to achieve this ???
