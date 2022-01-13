@@ -1,0 +1,437 @@
+Modular Deployments 
+
+A different file for provider ==> providers.tf 
+
+
+First Module ==> docker-image
+new folder ==> image
+
+Each module might have similar files aka main, providers, output, variables
+Also , we would need to reference the modules/tf to root's tf 
+For that we would need to create a module block , instead of resource block 
+
+module "image" {
+    source = "./image"
+}
+
+
+But what if we have a reference in the root tf to the module's tf . What to do in that case ?
+
+We will have to utilise the output.tf of the module block 
+In images/output.tf 
+output "image_out" {
+  value       = docker_image.nodered_image.latest
+  description = "Ip address of the container"
+}
+NOw we need to access this output from root's main.tf 
+This reference is done as :::: 
+image = module.image.image_out 
+Always do a terraform init after creating a new module 
+
+
+How to get the image name that is hardcoded , turnt into a variable/const ??? ?
+That needs to be passed from the root to the module and consumed there . 
+So we need to pass in a variable in the module so it can be consumed by the module 
+
+module "image"{
+    source = "./image"
+    image_in  = var.image[terraform.workspace]
+}
+Data we send to modules is with the intent that it should not be changed. 
+The data should be immutable and our priority should be to never touch the code inside the modules 
+
+In image/main.tf 
+Replace 
+resource "docker_image" "nodered_image" {
+
+    name = "nodered/node-red:latest"
+}
+
+with 
+resource "docker_image" "nodered_image" {
+#   name = var.image[terraform.workspace]
+    name = var.image_in
+}
+and to bridge this gap 
+in image/variables.tf 
+variable "input_in"{
+    description = "name of nodered image"
+}
+
+
+Basically image_in of module "image" is consumed by image/variables.tf file .
+ And this is referenced in image/main.tf 
+
+
+
+
+
+ Terraform Graph 
+ It shows dependency route/graph of the dependencies. It is not clear enough tbh 
+
+
+
+
+We need volume to container be mounted before the container resource runs, 
+or else we will get ourselves into an error. 
+We basically want a resource to be dependent on another resource.
+So for our case we want something from null_resource.dockervol to be wanted by 
+container resource which would lead to sequential rundown (implicit dependencies )
+
+To do that , in the container name 
+name  = join("-", ["zaza", terraform.workspace,null_resource.noderedvol.id,random_string.random[count.index].result])
+
+Install graphwiz and use it like this 
+>>  sudo apt install graphviz
+>> terraform graph | dot -Tpdf > file.pdf
+
+
+
+Explicit dependencies . 
+Do the thing above using this method 
+Add depends_on which sill sequentialise the resources 
+
+
+
+in image/providers.tf we dont need provider "docker" as it is inheritance. 
+REMOVE IT 
+
+
+
+
+
+Module Outputs 
+//Output important pieces of information ==> Output cannot have spaces
+output "IP_ADDRESS" {
+  value       = module.container[*].IP_ADDRESS
+  description = "Ip address of the container"
+  sensitive = true 
+}
+output "CONTAINER_NAME" {
+  value       = module.container[*].CONTAINER_NAME 
+  description = "Ip address of the container"
+}
+
+if you put module.container.CONTAINER_NAME 
+It will show an error like this 
+ Error: Unsupported attribute
+│ 
+│   on outputs.tf line 8, in output "CONTAINER_NAME":
+│    8:   value       = module.container.CONTAINER_NAME 
+│     ├────────────────
+│     │ module.container is a list of object, known only after apply
+│ 
+│ Can't access attributes on a list of objects. Did you mean to access attribute "CONTAINER_NAME" for a specific element of the list, or across all elements of the list?
+
+||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||
+
+
+
+For our code Output of IP might be coming like this 
+
+
+
+
+Docker Volume 
+docker_volume instead of local exec 
+one Note is every volume needs to be tightly coupled with the container. 
+Thats why we are not having a volume module 
+So now 
+  volumes {
+    container_path = var.container_path
+    host_path = var.host_path
+  }
+
+  becomes 
+    volumes {
+    container_path = var.container_path
+    host_path = "${var.name_container_in}--volume"
+  }
+  Now when we do terraform apply , we can see the newly created volume here 
+  >> docker volume ls 
+  But once you do a terraform destroy , the volume wont be destroyed 
+
+  For that we might need a docker_volume resource 
+  But when we use this 
+
+resource "docker_container" "nodered_container" {
+  name  = var.name_container_in  
+  image = var.image_container_in
+  
+  
+  ports {
+   internal = var.internal_container_port
+   external = var.external_container_port
+  }
+  
+  volumes {
+    container_path = var.container_path
+    host_path = docker_volume.container_volume.name
+  }
+}
+
+resource "docker_volume" "container_volume"{
+  name = "$docker_container.nodered_container.name}--volume"
+}
+
+We will have an error because of cyclic dependency 
+container needs volume name and volume name needs container name 
+How to resolve this dependency ???
+
+To check cycles 
+>> terraform graph -draw-cycles | dot -Tpdf > graph-cycle.pdf
+For now remove it by using var directly 
+
+Do a terraform destroy and the volume will be removed
+
+
+
+HOw to manage / prevent destruction of the Volume || How to selectively destroy resources 
+
+We will have to use lifecycles to customly prevent destruction 
+https://www.terraform.io/language/meta-arguments/lifecycle
+resource "docker_volume" "container_volume"{
+  name = "$docker_container.nodered_container.name}--volume"
+  lifecycle {
+      prevent_destroy=true
+  }
+}
+So now when try to do a terraform destroy this will come up 
+
+╷
+│ Error: Instance cannot be destroyed
+│ 
+│   on container/main.tf line 17:
+│   17: resource "docker_volume" "container_volume"{
+│ 
+│ Resource module.container[0].docker_volume.container_volume has lifecycle.prevent_destroy set, but the plan calls for this resource to be destroyed. To avoid this error and continue with the plan, either disable
+│ lifecycle.prevent_destroy or reduce the scope of the plan using the -target flag.
+╵
+
+
+
+
+
+To delete a specific module , we use target 
+>> terraform destroy --target {resourcename}
+
+
+
+
+Multiple resources , single Module 
+So till now we have been using a single image i.e node-red. 
+But what if we want to use several images ? 
+Would you like to create a separate resource for it ? No , we would like to keep it 
+as dry as possible . How to achieve this ???
+
+
+
+
+
+
+
+
+Now we might have modules that are similar in definition . 
+for example 
+module "nodered_image" {
+  source   = "./image"
+  image_in = var.image["nodered"][terraform.workspace]
+}
+
+module "influx_image" {
+  source   = "./image"
+  image_in = var.image["influxdb"][terraform.workspace]
+}
+
+
+Here the param keys are the same. Now what we can do , to minimise the code ?
+This example has 2 modules but it can be in 100s 
+So for that we use locals  and for_each 
+First create locals deployment 
+
+locals {
+  deployment = {
+    nodered = {
+      source = "./image"
+      image_in = var.image["nodered"][terraform.workspace]
+    }
+    influxdb = {
+  source   = "./image"
+  image_in = var.image["influxdb"][terraform.workspace]      
+    }
+  }
+}
+
+remove the influx image block 
+module "image" {
+  source   = each.value.source
+  for_each = local.deployment
+  
+  image_in = each.value.image
+}
+
+
+
+
+
+Deploying container with for_each 
+
+
+Now , We need to create two containers 
+1. nodered
+2. influxdb 
+We would like if we have least amount of code. 
+We already have a container module. We would like to use for_each , just how it used 
+in the image module, so that It can cover both influxdb and deployment
+
+For each and count on the same resource creates conflict, so its better to send count value to 
+the other module and implement count there 
+
+
+
+Now that we have implemented for_each , we can deploy both the images. 
+But how will I be able to deploy 4 containers of nodered and 2 of influxdb . 
+For that we would need to pass a parameter for count to the module . The module will set
+that value for the key "count"
+
+Also we would have to move the random_string to container/main.tf 
+As in main.tf , it is working for two image containers. If we have multiple containers per image, 
+The code will break as all will have the same container name 
+
+
+So in main.tf 
+
+
+module "container" {
+  source = "./container"
+  # count  = local.container_count
+  for_each = local.deployment
+  count_in = each.value.container_count // count value 
+  # depends_on              = [null_resource.docker_val]
+  name_container_in       = each.key // new name 
+  image_container_in      = module.image[each.key].image_out
+  internal_container_port = each.value.int_port
+  external_container_port = each.value.ext_port
+  container_path          = each.value.container_path
+  
+}
+
+
+
+add count_in to container/variables.tf
+
+Now in container/main.tf
+
+
+resource "random_string" "random" {
+  # for_each = local.deployment
+  count   = var.count_in
+  length  = 11
+  special = false
+  #   override_special = "/@£$"
+  upper = false
+}
+
+
+
+
+
+
+
+resource "docker_container" "nodered_container" {
+  name  = join("-", [var.name_container_in, terraform.workspace, random_string.random[count.index].result])
+  image = var.image_container_in
+  count = var.count_in
+  
+  ports {
+   internal = var.internal_container_port
+   external = var.external_container_port[count.index]
+  }
+  
+  volumes {
+    container_path = var.container_path
+    volume_name = docker_volume.container_volume[count.index].name
+  }
+}
+
+resource "docker_volume" "container_volume"{
+  count = var.count_in
+  name = "${var.name_container_in}-${random_string.random[count.index].result}-volume" // using randomString 
+  lifecycle {
+      prevent_destroy=false
+  }
+}
+
+
+
+
+Now how to show these new 6 containers ??? by using for loop to create MAPS 
+{for x in ...}
+
+
+
+
+How to backup your volume once a terraform destroy happens ?
+We will use self object 
+
+
+
+resource "docker_volume" "container_volume"{
+  count = var.count_in
+  name = "${var.name_container_in}-${random_string.random[count.index].result}-volume"
+  lifecycle {
+      prevent_destroy=false
+  }
+  provisioner "local-exec" {
+    when = destroy 
+    command = "mkdir ${path.cwd}/../backup/" // This will create a backup folder 
+    on_failure = continue  // when multiple containers, if created, continue 
+  }
+  provisioner "local-exec"{
+    when = destroy
+    command = "sudo tar -czvf ${path.cwd}/../backup/${self.name}.tar.gz ${self.mountpoint}" // self referencing the container. 
+    on_failure = fail 
+  }
+}
+self.mountpoint is where the volume 
+
+
+Dynamic Blocks 
+What if there are multiple container_paths ? One for data , other for configuration 
+For ex : we will implement dynamic blocks for grafana for multiple container_paths 
+resource "docker_container" "app_container" {
+  name  = join("-", [var.name_container_in, terraform.workspace, random_string.random[count.index].result])
+  image = var.image_container_in
+  count = var.count_in
+  
+  ports {
+   internal = var.internal_container_port
+   external = var.external_container_port[count.index]
+  }
+  
+  dynamic "volumes" { // dynamic block here. 
+    for_each = var.volumes_in 
+    content {
+      container_path = volumes.value["container_path_each"]
+      volume_name = docker_volume.container_volume[volumes.key].name
+    }
+
+  }
+    provisioner "local-exec"{
+    command = "echo ${self.name} : ${self.ip_address}:${join("",[for x in self.ports[*]["external"]: x])} >> containers.txt"
+  }
+  provisioner "local-exec"{
+    when = destroy 
+    command = "rm containers.txt"
+  }
+}
+
+
+
+Nestint the Volume Modules 
+For the above example, the deployment local has only grafana, and grafana has only single port in the tfvars . So this will fail if we have multiple ports 
+why ? 
+how to backup multiple containers ? volume names are also same 
+We also would need to backup both the mounted volumes
+
+create a volume folder inside of container folder 

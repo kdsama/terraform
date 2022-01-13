@@ -1,0 +1,304 @@
+terraform output will show the output(Only if it has been applied once)  
+ We can access these objects via terraform console
+
+terraform functions 
+ join(separater,[elementKey1,elementKey2])
+
+
+ Multiple Resources and Count
+ Count argument adds the resource n number of times. 
+ Cannot be used with Outputs. 
+ How to reduce mentioning indexes next to resources in outputs ? For that we would need 
+ splat expression.  exp.exp[*]
+ Will not work if Too many expressions
+ So in that case we will be using the for
+
+
+
+ terraform fmt formats the terraform file
+
+
+ Tainting and Updating Resources
+Tainting a resource is way of forcing a resource to be destroyed and re-apply
+ why ? to reapply configuration
+ we taint the randomstring. when we do terraform plan , it will show two resources (for the above case)
+ to be changed. Why ? Because the container depends upon the random string for naming purposes
+ untain to bring it back to previous plan .
+
+
+ State Locking and Breaking state
+ What if a terraform is deployed twice ??
+ Basically we deployed two terraform files in separate terminal at identical times. Both will get deployed. 
+ So in state only one container will be mentioned . 
+ But when we destroy, it throws an error. Why ? Because the image is now being used by two containers. 
+ So when we terraform tries to destroy the image, docker wont let it , as the other container is still
+ using it 
+ How to fix this issue wrt state ????
+
+
+
+Terraform Import 
+Terraform Import once applied, does not do any changes in the configuration. What it does is it lets the resource be imported in the state. The configuration remains as it is
+Because of this, prior to running terraform import it is necessary to write manually a resource configuration block for the resource, to which the imported object will be mapped.
+
+Lets take an example how to implement this import . 
+
+We create two docker containers through terraform concurrently (one in lock state, other is not )
+You would see two containers, copy second containers name 
+Add this block to the Tf file 
+
+resource "docker_container" "nodered_container2" {
+    
+    name = {{NAME_OF_SECOND_CONTAINER}}
+
+  image = docker_image.nodered_image.latest
+}
+
+Now to import , We need to mention the id of the docker image to work. So we would need to fetch the id first through the docker command 
+To fetch ID :- docker inspect
+>> docker inspect --format="{{.ID}}" NAME_OF_SECOND_CONTAINER
+Now To import we will write the following command 
+>> terraform import docker_container.nodered_container2 $(docker inspect --format="{{.ID}}" NAME_OF_SECOND_CONTAINER)
+
+$() used above means the following string will be run in the terminal 
+Run this and the terraform second block will be updated in the state 
+Check this state
+>> terraform state list 
+You here can see the second container 
+
+
+
+
+
+Terraform Refresh and State Rm 
+What if we update something in terraform resource ??
+If say , you change the name of the container, and apply terraform refresh 
+It will successfully execute. But if you go to docker and check the name , the name will be the previous one
+
+
+When you check the state file, the output is changed , but the container name itself has not changed 
+Say we change the length of random string 
+
+
+
+resource "random_string" "random" {
+  count            = 1
+  length           = 5
+  special          = false
+#   override_special = "/@£$"
+  upper            = false
+}
+
+
+And now we do a terraform refresh , It wont change anything at all. 
+Lets make a change to nodered_container as well 
+
+resource "docker_container" "nodered_container" {
+  count = 1
+  name  = join("-",["DABBA",random_string.random[count.index].result]) <== Name changed
+  // above resource needs to be referenced 
+  image = docker_image.nodered_image.latest
+  // latest provide the ID of the image . GIves a unique id that can be referenced 
+  ports {
+    internal = "1880"
+    # external = "2880"
+  }
+}
+
+
+
+Now we have made two changes, what if we want to target refresh on a single resource ?? 
+for that we will do 
+>> terraform refresh -target random_string.random
+Make sure of what actually is changed on a refresh. 
+
+What if a docker container is forcefully removed instead of making changes 
+to the terraform file 
+Our state is now out of sync . If you do 
+>> terraform state list 
+The removed container's name will also be present there . 
+Now if we do 
+>> terraform refresh 
+NOw the state will be updated, not the output though . 
+How the state will be changed ? container will be removed but the random string will still be present 
+in the state. 
+To remove this extra state from the state list 
+>> terraform state rm random_string.random[1]
+Whenever we do a manual state update , an extra backup is created . 
+
+
+
+
+
+Adding Variables 
+we can input variables from the command line or directly into the tf file . 
+
+var "ext_port" {
+
+}
+If we do this and do terraform apply , there will be a popup where the cli will ask for the
+input value of ext_port
+It will ask even on destroy, plan 
+
+We can use environment variables
+>> export TF_VAR_ext_port=1234
+doing this , It wont ask for input now when we do terraform plan
+Note TF_VAR is to be used 
+to remove the variable 
+>> unset TF_VAR_ext_port
+
+To setup from within the Tf file 
+variable "ext_port"{
+    type=string 
+    default = 1880
+}
+
+
+
+
+
+Variable Validation
+
+variable "int_port" {
+  type    = number
+  default = 1181
+  validation {
+    condition     = var.int_port == 1180
+    error_message = "Internal port should always be 1180."
+  }
+}
+
+
+
+Variable and Output Files
+How to break variables and output in separate files
+The folder in which you do terraform deploy, will deploy all the files ending with .tf 
+present in that folder 
+
+
+
+Sensitive variables and .tfvar files 
+For variables that potentially can hold Sensitive information , it should not be pushed to github 
+Thats why we need a .tfvars file 
+It should always be .gitignore
+
+
+
+
+Variable Definition Precedence 
+If you need to have multiple variable values for different scenarios (Development, Live )
+There should be a process where you can select .tfvars file according to the environment
+ its gonna run in.
+ In CLI , we can specify var file 
+ >> terraform plan --var-file wes.tfvars
+
+ We can also mention vars from CLI 
+ >> terraform plan -var ext_port 1993
+
+ CLI var files / variables will override .tfvars . The .tfvars can override default values 
+
+ What if we mention both , -var and --var-file 
+ Well in that case , the one mentioned afterwards will have precedence 
+ >> terraform plan -var ext_port 1993 --var-file wes.tfvars 
+ The ext_port in  wes.tfvars file will be used for the terraform plan 
+
+
+
+
+
+ HIDING SENSITIVE VARIABLES FROM CLI 
+ When we do terraform apply , or plan , the sensitive variable information 
+ could still be seen on the CLI . This is a problem, which can make sensitive 
+ keys exposed. Say we run a terraform binary on jenkins. You then would be able to 
+ see the sensitive keys in the output of Jenkins. 
+ How to deal with this ?
+ We can add sensitive flags to variables and outputs
+ add sensitive to the variable block 
+ variable "ext_port" {
+  type    = number
+  default = 1234
+    sensitive = true 
+}
+Any output now that refers to this sensitive value aka ext_port , will lead to breaking the terraform.
+One would need to add sensitive = true flag for the corresponding output block as well
+
+Well , the sensitive value can still be seen in the state file. 
+
+
+
+
+Bind Mount and Local Exec 
+We need a volume to store the files that nodered needs to operate . 
+For that we need a local Exec provisioner
+Use it for unimportant resources . Here Ansible is a better option
+The provisioner needs to be run inside a resource block 
+
+We can use its own resource block instead of making changes to other blocks 
+For that we can use "null_resource"
+
+resource "null_resource" "example1"{
+  provisioner "local_exec"{
+    command = "SomeCommand"
+  }
+}
+
+
+
+
+
+Utilizing Local Values 
+For multiple docker container deployments, we can use ext_port variable as a list 
+So if we add three items in the list , we expect at most 3 containers to be run 
+ports section of the terraform will change like this 
+  ports {
+    internal = var.int_port
+    external = var.ext_port[count.index]
+  }
+For the respective , container index, port will be picked
+so If we change container count to 4 , it will throw an error 
+Hence we need a way to contain this issue i.e number of containers cannot 
+exceed number of ports ?
+what if we do 
+In variables.tf 
+  variable "container_count" {
+    type    = number
+    default = length(var.ext_port)
+  }
+This is not possible as function calls aka length here cannot be done in variables 
+Also we cant reference a a different variable 
+So what to do ? 
+We can create a local value , sometimes called as locals 
+Basically how we use constants throughout our applications , by setting a value in constant files , 
+Local values is same like that , it will create a reference value that can be used in variable blocks.
+Also used when we need a recurring long expression 
+
+  locals {
+    container_count = length(ext_port)
+  }
+
+And now in main.tf
+
+resource "random_string" "random" {
+  count   = local.container_count
+  length  = 11
+  special = false
+  #   override_special = "/@£$"
+  upper = false
+}
+
+
+
+
+Min / Max and Expand Functions
+validation {
+  condition = max(var.ext_port...) <= 65535 && min(var.ext_port...) > 0 
+}
+
+arr...  <== expand expression same as that of a list in Go 
+
+
+Path References and String Interpolation 
+A Directory name is something that might change for each deployment 
+Hence its better to pull a path dynamically 
+https://www.terraform.io/language/expressions/references
+
