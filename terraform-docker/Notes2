@@ -48,7 +48,7 @@ locals {
 
 Main.tf 
 resource "docker_container" "nodered_container" {
-  count = local.container_count
+  count = local.container_count // local is being used here 
   name  = join("-", ["zaza", random_string.random[count.index].result])
   // above resource needs to be referenced 
   image = docker_image.nodered_image.latest

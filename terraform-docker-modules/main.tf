@@ -3,39 +3,31 @@
 
 
 module "image" {
+
+  for_each = local.deployment
   source   = "./image"
-  image_in = var.image[terraform.workspace]
+  image_in = each.value.image
 }
 
-
-module "container" {
-  source                  = "./container"
-  count                   = local.container_count
-  # depends_on              = [null_resource.docker_val]
-  name_container_in       = join("-", ["zaza", terraform.workspace, random_string.random[count.index].result])
-  image_container_in      = module.image.image_out
-  internal_container_port = var.int_port
-  external_container_port = var.ext_port[terraform.workspace][count.index]
-  container_path          = "/data"
-  host_path               = "${path.cwd}/noderedvol"
-}
-
-
-# resource "null_resource" "docker_val" {
-#   provisioner "local-exec" {
-#     command = "mkdir noderedvol/ || true && chown 1000:1000 noderedvol/ "
-#   }
+# module "influx_image" {
+#   source   = "./image"
+#   image_in = var.image["influxdb"][terraform.workspace]
 # }
 
 
-resource "random_string" "random" {
-  count   = local.container_count
-  length  = 11
-  special = false
-  #   override_special = "/@£$"
-  upper = false
+module "container" {
+  source = "./container"
+  # count  = local.container_count
+  for_each = local.deployment
+  count_in = each.value.container_count
+  # depends_on              = [null_resource.docker_val]
+  name_container_in       = each.key
+  image_container_in      = module.image[each.key].image_out
+  internal_container_port = each.value.int_port
+  external_container_port = each.value.ext_port
+  volumes_in          = each.value.volumes
+  
 }
-
 
 
 

@@ -1,0 +1,3 @@
+influxdb-prod-3q8z4h5vl8v : 172.17.0.3:8086
+nodered-prod-4u84or9hhcw : 172.17.0.4:1991
+grafana-prod-1lgkxzbirf6 : 172.17.0.5:3333
